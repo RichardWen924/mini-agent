@@ -13,11 +13,6 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(message.role, Role.USER)
         self.assertEqual(message.content, "你好")
 
-    def test_tool_role_is_available(self) -> None:
-        """验证工具角色使用预期的字符串值。"""
-
-        self.assertEqual(Role.TOOL.value, "tool")
-
     def test_message_to_dict_uses_role_value(self) -> None:
         """验证消息字典使用角色值而不是枚举名称。"""
 
@@ -34,23 +29,17 @@ class MessageTests(unittest.TestCase):
     def test_empty_content_is_detected(self) -> None:
         """验证空字符串会被识别为空消息。"""
 
-        message = Message(Role.USER, "")
-
-        self.assertTrue(message.is_empty())
+        self.assertTrue(Message(Role.USER, "").is_empty())
 
     def test_whitespace_content_is_detected(self) -> None:
         """验证只包含空白字符的内容会被识别为空消息。"""
 
-        message = Message(Role.USER, "   \t\n")
-
-        self.assertTrue(message.is_empty())
+        self.assertTrue(Message(Role.USER, "   \t\n").is_empty())
 
     def test_normal_content_is_not_empty(self) -> None:
         """验证普通文本不会被识别为空消息。"""
 
-        message = Message(Role.ASSISTANT, "你好")
-
-        self.assertFalse(message.is_empty())
+        self.assertFalse(Message(Role.ASSISTANT, "你好").is_empty())
 
     def test_invalid_role_raises_type_error(self) -> None:
         """验证传入非 Role 值时会抛出类型错误。"""

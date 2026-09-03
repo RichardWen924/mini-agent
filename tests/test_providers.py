@@ -1,121 +1,148 @@
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from mini_agent.models import Message, Role
-from mini_agent.providers import (
-    ProviderResponse,
-    RuleBasedProvider,
-    ToolCall,
-)
+from mini_agent.providers import OpenAIProvider
 
 
-class RuleBasedProviderTests(unittest.TestCase):
-    def setUp(self) -> None:
-        """为每个测试创建一个独立的规则 Provider。"""
+class FakeResponses:
+    """记录 Responses API 调用的 fake responses 资源。"""
 
-        self.provider = RuleBasedProvider()
+    def __init__(self, output_text: str, output: list[object] | None = None) -> None:
+        """保存 fake 模型输出、工具调用和调用参数。"""
 
-    def test_rule_provider_returns_deterministic_hello(self) -> None:
-        """验证 hello 输入会返回确定性的普通助手回复。"""
+        self.output_text = output_text
+        self.output = output or []
+        self.calls: list[dict[str, object]] = []
 
-        response = self.provider.complete(
-            [
-                Message(Role.USER, "hello"),
-            ]
-        )
+    def create(self, **kwargs: object) -> SimpleNamespace:
+        """记录请求参数并返回假响应。"""
 
-        self.assertEqual(response.message.role, Role.ASSISTANT)
-        self.assertEqual(response.message.content, "Hello!")
-        self.assertIsNone(response.tool_call)
+        self.calls.append(kwargs)
+        return SimpleNamespace(output_text=self.output_text, output=self.output)
 
-    def test_rule_provider_returns_tool_call_for_calculation(
+
+class FakeClient:
+    """提供 fake Responses API 的客户端。"""
+
+    def __init__(self, response: FakeResponses) -> None:
+        """初始化 fake responses 资源。"""
+
+        self.responses = response
+
+
+class OpenAIProviderTests(unittest.TestCase):
+    @patch("mini_agent.providers.OpenAI")
+    def test_deepseek_key_selects_deepseek_endpoint_and_model(
         self,
+        openai_class: object,
     ) -> None:
-        """验证计算命令会生成 calculator 工具调用。"""
+        """验证设置 DEEPSEEK_API_KEY 时使用 DeepSeek 配置。"""
 
-        response = self.provider.complete(
-            [
-                Message(Role.USER, "calc add 2 3"),
-            ]
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "ds-key"}, clear=True):
+            provider = OpenAIProvider()
+
+        openai_class.assert_called_once_with(  # type: ignore[attr-defined]
+            api_key="ds-key",
+            base_url="https://api.deepseek.com",
         )
+        self.assertEqual(provider.model, "deepseek-v4-flash")
 
-        self.assertIsNotNone(response.tool_call)
-        self.assertEqual(response.tool_call.name, "calculator")
+    @patch("mini_agent.providers.OpenAI")
+    def test_base_url_can_be_configured_for_openai_compatible_api(
+        self,
+        openai_class: object,
+    ) -> None:
+        """验证可以通过 OPENAI_BASE_URL 配置兼容 API 地址。"""
 
-    def test_tool_call_contains_expected_arguments(self) -> None:
-        """验证工具调用包含正确的运算名称和参数。"""
-
-        response = self.provider.complete(
-            [
-                Message(Role.USER, "calc multiply 4 5"),
-            ]
-        )
-
-        self.assertEqual(
-            response.tool_call.arguments,
+        with patch.dict(
+            "os.environ",
             {
-                "operation": "multiply",
-                "a": 4.0,
-                "b": 5.0,
+                "OPENAI_API_KEY": "compatible-key",
+                "OPENAI_BASE_URL": "https://example.test/v1",
+                "OPENAI_MODEL": "compatible-model",
             },
+            clear=True,
+        ):
+            provider = OpenAIProvider()
+
+        openai_class.assert_called_once_with(  # type: ignore[attr-defined]
+            api_key="compatible-key",
+            base_url="https://example.test/v1",
         )
+        self.assertEqual(provider.model, "compatible-model")
 
-    def test_rule_provider_handles_unknown_text(self) -> None:
-        """验证普通文本会返回确定性的回显回复。"""
+    def test_complete_calls_responses_api_with_tools(self) -> None:
+        """验证 Provider 使用 Responses API 并传递工具定义。"""
 
-        response = self.provider.complete(
+        response = FakeResponses("你好！")
+        provider = OpenAIProvider(
+            model="test-model",
+            client=FakeClient(response),  # type: ignore[arg-type]
+        )
+        input_items = [{"role": "user", "content": "你好"}]
+        tool_definitions = [{"type": "function", "name": "read"}]
+
+        result = provider.complete(input_items, tool_definitions)
+
+        self.assertEqual(result.text, "你好！")
+        self.assertEqual(result.tool_calls, ())
+        self.assertEqual(
+            response.calls,
             [
-                Message(Role.USER, "你好"),
-            ]
+                {
+                    "model": "test-model",
+                    "input": input_items,
+                    "tools": tool_definitions,
+                }
+            ],
         )
 
-        self.assertEqual(response.message.content, "你说的是：你好")
-        self.assertIsNone(response.tool_call)
+    def test_complete_parses_function_call_output(self) -> None:
+        """验证 Provider 会解析模型返回的 function_call。"""
 
-    def test_invalid_calculation_command_does_not_crash(
-        self,
-    ) -> None:
-        """验证无效计算命令不会导致 Provider 崩溃。"""
-
-        response = self.provider.complete(
-            [
-                Message(Role.USER, "calc add x 2"),
-            ]
+        function_call = SimpleNamespace(
+            type="function_call",
+            call_id="call_1",
+            name="read",
+            arguments='{"path":"README.md"}',
+        )
+        response = FakeResponses("", [function_call])
+        provider = OpenAIProvider(
+            model="test-model",
+            client=FakeClient(response),  # type: ignore[arg-type]
         )
 
-        self.assertIsInstance(response, ProviderResponse)
-        self.assertIsNone(response.tool_call)
-
-    def test_empty_messages_return_assistant_response(self) -> None:
-        """验证空消息列表也会返回合法助手响应。"""
-
-        response = self.provider.complete([])
-
-        self.assertEqual(response.message.role, Role.ASSISTANT)
-        self.assertIsNone(response.tool_call)
-
-    def test_tool_message_returns_assistant_response(self) -> None:
-        """验证工具消息会被转换成助手可读的回复。"""
-
-        response = self.provider.complete(
-            [
-                Message(Role.TOOL, '{"ok": true, "result": 5.0}'),
-            ]
+        result = provider.complete(
+            [{"role": "user", "content": "读取 README"}],
+            [],
         )
 
-        self.assertEqual(response.message.role, Role.ASSISTANT)
-        self.assertIn("5.0", response.message.content)
-        self.assertIsNone(response.tool_call)
+        self.assertEqual(len(result.tool_calls), 1)
+        self.assertEqual(result.tool_calls[0].call_id, "call_1")
+        self.assertEqual(result.tool_calls[0].name, "read")
+        self.assertEqual(result.tool_calls[0].arguments, {"path": "README.md"})
+        self.assertEqual(result.output_items[0]["type"], "function_call")
 
-    def test_tool_call_has_expected_type(self) -> None:
-        """验证计算命令返回的工具调用对象类型正确。"""
+    def test_model_can_be_read_from_environment(self) -> None:
+        """验证未显式传入模型时可以读取 OPENAI_MODEL。"""
 
-        response = self.provider.complete(
-            [
-                Message(Role.USER, "calc subtract 8 3"),
-            ]
-        )
+        response = FakeResponses("回答")
 
-        self.assertIsInstance(response.tool_call, ToolCall)
+        with patch.dict("os.environ", {"OPENAI_MODEL": "env-model"}):
+            provider = OpenAIProvider(client=FakeClient(response))  # type: ignore[arg-type]
+            provider.complete([{"role": "user", "content": "问题"}], [])
+
+        self.assertEqual(response.calls[0]["model"], "env-model")
+
+    def test_empty_input_is_rejected(self) -> None:
+        """验证 Provider 不会发送空输入。"""
+
+        provider = OpenAIProvider(client=FakeClient(FakeResponses("回答")))  # type: ignore[arg-type]
+
+        with self.assertRaises(ValueError):
+            provider.complete([], [])
 
 
 if __name__ == "__main__":

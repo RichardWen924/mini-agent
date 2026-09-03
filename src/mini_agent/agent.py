@@ -1,9 +1,7 @@
-import json
-
 from .models import Message, Role
-from .prompts import build_prompt, trim_history
+from .prompts import build_prompt
 from .providers import Provider
-from .tools import ToolError, ToolRegistry
+from .tools import ToolError, ToolRegistry, tool_error_json
 
 
 class AgentError(Exception):
@@ -11,7 +9,7 @@ class AgentError(Exception):
 
 
 class Agent:
-    """协调 prompt、Provider 和工具执行的最小 Agent。"""
+    """协调历史消息、Provider 和四个基础工具的最小 Agent。"""
 
     def __init__(
         self,
@@ -21,7 +19,7 @@ class Agent:
         max_steps: int = 3,
         max_history: int = 20,
     ) -> None:
-        """创建 Agent 并配置模型、工具和循环限制。"""
+        """创建 Agent 并配置模型、工具、循环和历史长度。"""
 
         if not system_prompt.strip():
             raise ValueError("system_prompt must not be empty")
@@ -40,7 +38,7 @@ class Agent:
         self.history: list[Message] = []
 
     def ask(self, user_input: str) -> str:
-        """处理一次用户问题并返回最终文本回复。"""
+        """处理用户问题，必要时循环执行模型请求的工具调用。"""
 
         prompt = build_prompt(
             self.system_prompt,
@@ -48,42 +46,39 @@ class Agent:
             user_input,
             self.max_history,
         )
-        self.history.append(Message(Role.USER, user_input))
+        input_items = [message.to_dict() for message in prompt]
 
         for _ in range(self.max_steps):
             try:
-                response = self.provider.complete(prompt)
+                response = self.provider.complete(
+                    input_items,
+                    self.tools.definitions(),
+                )
             except Exception as exc:
-                raise AgentError("model provider failed") from exc
+                raise AgentError(f"model provider failed: {exc}") from exc
 
-            self.history.append(response.message)
-
-            if response.tool_call is None:
-                return response.message.content
-
-            try:
-                tool_content = self.tools.call(
-                    response.tool_call.name,
-                    response.tool_call.arguments,
+            if not response.tool_calls:
+                self.history.extend(
+                    [
+                        Message(Role.USER, user_input),
+                        Message(Role.ASSISTANT, response.text),
+                    ]
                 )
-            except ToolError as exc:
-                tool_content = json.dumps(
+                return response.text
+
+            input_items.extend(response.output_items)
+            for tool_call in response.tool_calls:
+                try:
+                    output = self.tools.call(tool_call.name, tool_call.arguments)
+                except ToolError as exc:
+                    output = tool_error_json(str(exc))
+
+                input_items.append(
                     {
-                        "ok": False,
-                        "error": str(exc),
-                    },
-                    ensure_ascii=False,
+                        "type": "function_call_output",
+                        "call_id": tool_call.call_id,
+                        "output": output,
+                    }
                 )
 
-            self.history.append(Message(Role.TOOL, tool_content))
-            prompt = self._build_history_prompt()
-
-        return "已达到最大处理步骤，无法完成请求。"
-
-    def _build_history_prompt(self) -> list[Message]:
-        """根据系统提示词和当前历史构造后续模型请求。"""
-
-        return [
-            Message(Role.SYSTEM, self.system_prompt),
-            *trim_history(self.history, self.max_history),
-        ]
+        raise AgentError("maximum tool steps exceeded")

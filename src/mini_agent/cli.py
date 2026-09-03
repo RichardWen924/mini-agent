@@ -4,7 +4,7 @@ import sys
 from typing import TextIO
 
 from .agent import Agent, AgentError
-from .providers import RuleBasedProvider
+from .providers import OpenAIProvider
 from .tools import ToolRegistry
 
 
@@ -18,13 +18,18 @@ def parse_args(
     """解析命令行参数并返回程序配置。"""
 
     parser = argparse.ArgumentParser(
-        description="运行一个本地规则驱动的最小 Agent。",
+        description="运行一个使用 OpenAI API 和四个基础工具的最小 Agent。",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="使用的模型；未指定时读取 OPENAI_MODEL。",
     )
     parser.add_argument(
         "--max-steps",
         type=int,
         default=3,
-        help="每个问题允许的最大模型处理步数。",
+        help="每个问题允许的最大工具调用轮数。",
     )
     parser.add_argument(
         "--max-history",
@@ -41,10 +46,10 @@ def parse_args(
 
 
 def create_agent(args: argparse.Namespace) -> Agent:
-    """根据命令行配置创建本地规则驱动 Agent。"""
+    """根据命令行配置创建 OpenAI Agent。"""
 
     return Agent(
-        provider=RuleBasedProvider(),
+        provider=OpenAIProvider(model=args.model),
         tools=ToolRegistry(),
         system_prompt=args.system_prompt,
         max_steps=args.max_steps,

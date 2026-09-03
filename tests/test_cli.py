@@ -6,13 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from mini_agent.agent import AgentError
-from mini_agent.cli import (
-    create_agent,
-    main,
-    parse_args,
-    run_interactive,
-)
-from mini_agent.providers import RuleBasedProvider
+from mini_agent.cli import create_agent, main, parse_args, run_interactive
 from mini_agent.tools import ToolRegistry
 
 
@@ -33,7 +27,7 @@ class FakeAgent:
 
 
 class ErrorAgent:
-    """总是抛出 AgentError 的测试 Agent。"""
+    """总是抛出 AgentError 的 fake Agent。"""
 
     def ask(self, user_input: str) -> str:
         """模拟 Agent 处理失败。"""
@@ -42,18 +36,19 @@ class ErrorAgent:
 
 
 class CliTests(unittest.TestCase):
-    def test_cli_module_starts_successfully(self) -> None:
-        """验证 CLI 模块可以启动并输出就绪提示。"""
+    def test_cli_without_api_key_returns_configuration_error(self) -> None:
+        """验证没有 API Key 时 CLI 返回配置错误而不是崩溃。"""
 
-        result = subprocess.run(
-            [sys.executable, "-m", "mini_agent.cli"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with patch.dict("os.environ", {}, clear=True):
+            result = subprocess.run(
+                [sys.executable, "-m", "mini_agent.cli"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("mini-agent ready", result.stdout)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("OPENAI_API_KEY or DEEPSEEK_API_KEY", result.stderr)
 
     def test_parse_args_uses_defaults(self) -> None:
         """验证命令行参数使用默认配置。"""
@@ -62,37 +57,44 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.max_steps, 3)
         self.assertEqual(args.max_history, 20)
+        self.assertIsNone(args.model)
 
     def test_parse_args_accepts_custom_values(self) -> None:
-        """验证命令行参数可以覆盖默认配置。"""
+        """验证命令行参数可以覆盖模型和 Agent 限制。"""
 
         args = parse_args(
             [
+                "--model",
+                "test-model",
                 "--max-steps",
-                "1",
-                "--max-history",
                 "5",
+                "--max-history",
+                "10",
                 "--system-prompt",
                 "测试系统提示词",
             ]
         )
 
-        self.assertEqual(args.max_steps, 1)
-        self.assertEqual(args.max_history, 5)
+        self.assertEqual(args.model, "test-model")
+        self.assertEqual(args.max_steps, 5)
+        self.assertEqual(args.max_history, 10)
         self.assertEqual(args.system_prompt, "测试系统提示词")
 
-    def test_create_agent_uses_rule_based_provider(self) -> None:
-        """验证 CLI 创建的是本地规则 Provider Agent。"""
+    def test_create_agent_uses_openai_provider_and_four_tools(self) -> None:
+        """验证 CLI 创建 OpenAI Provider 和四工具 Agent。"""
 
         args = Namespace(
+            model="test-model",
             max_steps=2,
             max_history=5,
             system_prompt="系统提示词",
         )
 
-        agent = create_agent(args)
+        with patch("mini_agent.cli.OpenAIProvider") as provider_class:
+            agent = create_agent(args)
 
-        self.assertIsInstance(agent.provider, RuleBasedProvider)
+        provider_class.assert_called_once_with(model="test-model")
+        self.assertIs(agent.provider, provider_class.return_value)
         self.assertIsInstance(agent.tools, ToolRegistry)
         self.assertEqual(agent.max_steps, 2)
         self.assertEqual(agent.max_history, 5)
@@ -114,85 +116,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(agent.inputs, ["hello"])
         self.assertIn("收到：hello", output.getvalue())
 
-    def test_interactive_loop_executes_calculation(self) -> None:
-        """验证交互循环可以通过 Agent 完成计算工具调用。"""
-
-        agent = create_agent(
-            Namespace(
-                max_steps=3,
-                max_history=20,
-                system_prompt="系统提示词",
-            )
-        )
-        output = StringIO()
-
-        status = run_interactive(
-            agent,
-            StringIO("calc add 2 3\nquit\n"),
-            output,
-            StringIO(),
-        )
-
-        self.assertEqual(status, 0)
-        self.assertIn("5.0", output.getvalue())
-
     def test_empty_input_is_not_sent_to_agent(self) -> None:
         """验证空输入不会调用 Agent。"""
 
         agent = FakeAgent()
         output = StringIO()
 
-        run_interactive(
-            agent,
-            StringIO("   \nquit\n"),
-            output,
-            StringIO(),
-        )
+        run_interactive(agent, StringIO("   \nquit\n"), output, StringIO())
 
         self.assertEqual(agent.inputs, [])
         self.assertIn("请输入内容", output.getvalue())
 
-    def test_quit_stops_loop(self) -> None:
-        """验证 quit 命令会正常结束交互循环。"""
+    def test_quit_and_exit_stop_loop(self) -> None:
+        """验证 quit 和 exit 命令会正常结束交互循环。"""
 
-        agent = FakeAgent()
+        for command in ("quit", "exit"):
+            agent = FakeAgent()
 
-        status = run_interactive(
-            agent,
-            StringIO("quit\n后续输入\n"),
-            StringIO(),
-            StringIO(),
-        )
+            status = run_interactive(
+                agent,
+                StringIO(f"{command}\n后续输入\n"),
+                StringIO(),
+                StringIO(),
+            )
 
-        self.assertEqual(status, 0)
-        self.assertEqual(agent.inputs, [])
-
-    def test_exit_stops_loop(self) -> None:
-        """验证 exit 命令会正常结束交互循环。"""
-
-        agent = FakeAgent()
-
-        status = run_interactive(
-            agent,
-            StringIO("exit\n后续输入\n"),
-            StringIO(),
-            StringIO(),
-        )
-
-        self.assertEqual(status, 0)
-        self.assertEqual(agent.inputs, [])
+            self.assertEqual(status, 0)
+            self.assertEqual(agent.inputs, [])
 
     def test_eof_stops_loop(self) -> None:
         """验证输入流结束时交互循环会正常退出。"""
 
         agent = FakeAgent()
 
-        status = run_interactive(
-            agent,
-            StringIO("hello\n"),
-            StringIO(),
-            StringIO(),
-        )
+        status = run_interactive(agent, StringIO("hello\n"), StringIO(), StringIO())
 
         self.assertEqual(status, 0)
         self.assertEqual(agent.inputs, ["hello"])
@@ -221,7 +177,7 @@ class CliTests(unittest.TestCase):
             patch("mini_agent.cli.create_agent", return_value=fake_agent) as create,
             patch("mini_agent.cli.run_interactive", return_value=7) as run,
         ):
-            status = main(["--max-steps", "1"])
+            status = main(["--model", "test-model"])
 
         self.assertEqual(status, 7)
         create.assert_called_once()
