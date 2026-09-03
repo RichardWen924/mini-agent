@@ -5,6 +5,8 @@ import unittest
 
 class CliTests(unittest.TestCase):
     def test_cli_module_starts_successfully(self) -> None:
+        """验证 CLI 模块可以启动并输出就绪提示。"""
+
         result = subprocess.run(
             [sys.executable, "-m", "mini_agent.cli"],
             capture_output=True,
