@@ -3,7 +3,7 @@ name = "mini-agent"
 version = "0.1.0"
 description = "Add your description here"
 authors = [
-    { name = "wen rz", email = "wenrz@tsintergy.com" }
+    { name = "Richardwen", email = "Richardwen@gmail.com" }
 ]
 requires-python = ">=3.13"
 dependencies = []
